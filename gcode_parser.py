@@ -13,7 +13,8 @@ INFILL_FEATURE_TYPES = {"FILL", "SKIN", "TOP-SURFACE-SKIN", "BOTTOM-SURFACE-SKIN
 
 # Utility functions related to points and segments
 def dist_sq(p1, p2):
-    if p1 is None or p2 is None or p1[0] is None or p1[1] is None or p2[0] is None or p2[1] is None:
+    if p1 is None or p2 is None or len(p1) < 2 or len(p2) < 2 or \
+       p1[0] is None or p1[1] is None or p2[0] is None or p2[1] is None:
         return float('inf')
     return (p1[0] - p2[0])**2 + (p1[1] - p2[1])**2
 
@@ -54,6 +55,7 @@ def extract_gcode_features(
                 new_layer_num = int(layer_match.group(1))
                 if new_layer_num != current_gcode_layer_num:
                     current_gcode_layer_num = new_layer_num
+                    # Try to capture Z from current_pos when layer changes, if Z known and not yet stored for this layer
                     if current_pos['Z'] is not None and layer_z_values[current_gcode_layer_num] is None:
                          layer_z_values[current_gcode_layer_num] = current_pos['Z']
 
@@ -66,8 +68,9 @@ def extract_gcode_features(
             params = dict(PARAM_RE.findall(params_str))
 
             pos_before_move = current_pos.copy()
-            new_pos_temp = current_pos.copy()
+            new_pos_temp = current_pos.copy() # Operate on a temporary copy for Z update
             moved_xy = False
+
             for axis, val_str in params.items():
                 try:
                     val = float(val_str)
@@ -75,33 +78,42 @@ def extract_gcode_features(
                     if axis in ('X', 'Y'):
                         if current_pos[axis] is not None and abs(val - current_pos[axis]) > cfg_moved_xy_thresh:
                             moved_xy = True
-                        elif current_pos[axis] is None and val is not None:
+                        elif current_pos[axis] is None and val is not None: # First XY move
                             moved_xy = True
+                    # If Z is updated on this line, and it's for the current layer, store it if not already stored
                     if axis == 'Z' and current_gcode_layer_num != -1 and layer_z_values[current_gcode_layer_num] is None:
                         layer_z_values[current_gcode_layer_num] = val
                 except ValueError: pass
 
+            # Ensure initial positions are set if they appear for the first time
             for axis_init in ('X', 'Y', 'Z', 'E'):
                 if current_pos[axis_init] is None and axis_init in params:
                     try:
                         val = float(params[axis_init])
-                        current_pos[axis_init] = val
+                        current_pos[axis_init] = val # Set initial value in current_pos
                         if axis_init == 'Z' and current_gcode_layer_num != -1 and layer_z_values[current_gcode_layer_num] is None:
                             layer_z_values[current_gcode_layer_num] = val
                     except ValueError: pass
+            
+            # After processing params, if Z value for current layer is still unknown but available in new_pos_temp, update
+            if current_gcode_layer_num != -1 and layer_z_values[current_gcode_layer_num] is None and new_pos_temp['Z'] is not None:
+                layer_z_values[current_gcode_layer_num] = new_pos_temp['Z']
+
 
             if command == 'G0':
                 if moved_xy and \
                    pos_before_move['X'] is not None and pos_before_move['Y'] is not None and \
+                   new_pos_temp.get('X') is not None and new_pos_temp.get('Y') is not None and \
                    current_gcode_layer_num != -1:
                     p_start_travel = (pos_before_move['X'], pos_before_move['Y'])
                     p_end_travel = (new_pos_temp['X'], new_pos_temp['Y'])
                     if dist_sq(p_start_travel, p_end_travel) > cfg_min_segment_len_eps_sq:
                         layer_travel_segments[current_gcode_layer_num].append((p_start_travel, p_end_travel))
-                current_pos = new_pos_temp
+                current_pos = new_pos_temp # Commit changes from new_pos_temp
             elif command == 'G1':
                 delta_e = 0.0
                 has_e_param = 'E' in params
+                # Ensure E values are present in both pos_before_move and new_pos_temp for delta_e calculation
                 if has_e_param and pos_before_move['E'] is not None and new_pos_temp.get('E') is not None:
                     delta_e = new_pos_temp['E'] - pos_before_move['E']
 
@@ -115,40 +127,43 @@ def extract_gcode_features(
                     is_deretraction_cmd_move = True
 
                 if is_retraction_cmd_move or is_deretraction_cmd_move:
-                    current_pos = new_pos_temp
+                    current_pos = new_pos_temp # Commit changes
                     continue
 
                 if moved_xy:
-                    p_start_g1 = (pos_before_move['X'], pos_before_move['Y'])
-                    p_end_g1 = (new_pos_temp['X'], new_pos_temp['Y'])
-                    can_create_segment = (pos_before_move['X'] is not None and
-                                          pos_before_move['Y'] is not None and
-                                          current_gcode_layer_num != -1 and
-                                          dist_sq(p_start_g1, p_end_g1) > cfg_min_segment_len_eps_sq)
-                    if can_create_segment:
-                        is_a_printing_g1_move = (not is_retracted and
-                                                 has_e_param and
-                                                 delta_e > cfg_min_e_delta_printing)
-                        is_current_type_wall = current_feature_type_str in WALL_TYPES
-                        is_current_type_infill = current_feature_type_str in INFILL_FEATURE_TYPES
+                    # Ensure X,Y are valid before creating segment points
+                    if pos_before_move['X'] is not None and pos_before_move['Y'] is not None and \
+                       new_pos_temp.get('X') is not None and new_pos_temp.get('Y') is not None:
+                        p_start_g1 = (pos_before_move['X'], pos_before_move['Y'])
+                        p_end_g1 = (new_pos_temp['X'], new_pos_temp['Y'])
+                        can_create_segment = (current_gcode_layer_num != -1 and
+                                              dist_sq(p_start_g1, p_end_g1) > cfg_min_segment_len_eps_sq)
+                        if can_create_segment:
+                            is_a_printing_g1_move = (not is_retracted and
+                                                     has_e_param and # E must be present for printing
+                                                     delta_e > cfg_min_e_delta_printing)
+                            is_current_type_wall = current_feature_type_str in WALL_TYPES
+                            is_current_type_infill = current_feature_type_str in INFILL_FEATURE_TYPES
 
-                        if is_current_type_wall and is_a_printing_g1_move:
-                            layer_wall_segments[current_gcode_layer_num].append((p_start_g1, p_end_g1))
-                        elif is_current_type_infill and is_a_printing_g1_move:
-                            layer_original_infill_segments[current_gcode_layer_num].append(((p_start_g1), (p_end_g1)))
-                        elif not is_a_printing_g1_move:
-                            layer_travel_segments[current_gcode_layer_num].append((p_start_g1, p_end_g1))
-                current_pos = new_pos_temp
-            elif command == 'G92':
+                            if is_current_type_wall and is_a_printing_g1_move:
+                                layer_wall_segments[current_gcode_layer_num].append((p_start_g1, p_end_g1))
+                            elif is_current_type_infill and is_a_printing_g1_move:
+                                layer_original_infill_segments[current_gcode_layer_num].append(((p_start_g1), (p_end_g1)))
+                            elif not is_a_printing_g1_move: # Could be travel during a G1 (e.g. Z-hop, or non-extruding G1)
+                                layer_travel_segments[current_gcode_layer_num].append((p_start_g1, p_end_g1))
+                current_pos = new_pos_temp # Commit changes
+            elif command == 'G92': # Deals with E reset typically
                 if 'E' in params:
                     try:
-                        if float(params['E']) == 0: is_retracted = False
+                        if float(params['E']) == 0: is_retracted = False # G92 E0 often means deretract/reset extrusion
                     except ValueError: pass
+                # Update current_pos for any axis specified in G92
                 for axis_g92 in ['X', 'Y', 'Z', 'E']:
                     if axis_g92 in params:
                         try: current_pos[axis_g92] = float(params[axis_g92])
                         except ValueError: pass
 
+    # Stitching wall segments
     stitched_wall_loops = defaultdict(list)
     print("Stitching wall segments into manifold loops...")
     for layer_num, segments in sorted(layer_wall_segments.items()):
@@ -167,6 +182,7 @@ def extract_gcode_features(
                     if visited[j]: continue
                     segment_j_start, segment_j_end = segments[j]
                     d_sq = dist_sq(last_point_in_loop, segment_j_start)
+                    # Use cfg_coord_epsilon for stitching closeness
                     if d_sq < cfg_coord_epsilon**2 and d_sq < min_dist_sq_cand:
                         min_dist_sq_cand, best_candidate_idx, candidate_reversed = d_sq, j, False
                     d_sq_rev = dist_sq(last_point_in_loop, segment_j_end)
@@ -177,22 +193,27 @@ def extract_gcode_features(
                     visited[best_candidate_idx] = True
                     current_loop_points.append(chosen_segment[1] if not candidate_reversed else chosen_segment[0])
                     extended = True
+                # Check for loop closure
                 if not extended or (len(current_loop_points) > 1 and are_points_close(current_loop_points[0], current_loop_points[-1], cfg_coord_epsilon)):
                     break
             if len(current_loop_points) > 1:
+                # If closed and has at least 3 distinct points (start, middle, end~start)
                 if are_points_close(current_loop_points[0], current_loop_points[-1], cfg_coord_epsilon) and len(current_loop_points) > 2:
-                    stitched_wall_loops[layer_num].append(current_loop_points[:-1])
-                else:
+                    stitched_wall_loops[layer_num].append(current_loop_points[:-1]) # Remove duplicate end point
+                else: # Open loop
                     stitched_wall_loops[layer_num].append(current_loop_points)
     print("Stitching complete.")
+
     output_data = defaultdict(lambda: {
         'wall_loops': [], 'travel_segments': [], 'original_infill_segments': []
     })
     all_layer_nums = set(stitched_wall_loops.keys()) | \
                      set(layer_travel_segments.keys()) | \
                      set(layer_original_infill_segments.keys())
+
     for layer_num in sorted(list(all_layer_nums)):
         output_data[layer_num]['wall_loops'] = stitched_wall_loops.get(layer_num, [])
         output_data[layer_num]['travel_segments'] = layer_travel_segments.get(layer_num, [])
         output_data[layer_num]['original_infill_segments'] = layer_original_infill_segments.get(layer_num, [])
+
     return output_data, layer_z_values
