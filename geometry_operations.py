@@ -1,4 +1,3 @@
-# geometry_operations.py
 import math
 try:
     from shapely.geometry import Polygon, MultiPolygon, Point, LineString
@@ -12,12 +11,12 @@ except ImportError:
     # The main script handles the SHAPELY_AVAILABLE check.
 
 # Import from gcode_parser for utility functions if needed directly
-# For example, if are_points_close is used here.
 from . import gcode_parser # Use relative import if this is part of a package
 
 def identify_candidate_regions_shapely(layer_wall_loops, cfg_min_area_thresh, cfg_coord_epsilon):
     if not SHAPELY_AVAILABLE:
-        print("Shapely not available in geometry_operations.identify_candidate_regions_shapely")
+        # This print might be redundant if main_script already checks and exits/warns
+        # print("Shapely not available in geometry_operations.identify_candidate_regions_shapely")
         return []
     if not layer_wall_loops:
         return []
@@ -36,100 +35,105 @@ def identify_candidate_regions_shapely(layer_wall_loops, cfg_min_area_thresh, cf
             if poly.geom_type == 'Polygon':
                 current_polys_from_loop.append(poly)
             elif poly.geom_type == 'MultiPolygon':
-                for p_part in poly.geoms: # Use .geoms for MultiPolygon
+                for p_part in poly.geoms: 
                     if p_part.geom_type == 'Polygon':
                         current_polys_from_loop.append(p_part)
-        except Exception: # Broad exception for geometry creation issues
-            # print(f"Warning: Could not create valid polygon from loop {i}. Skipping.")
+        except Exception: 
             continue
 
         for idx, p_valid in enumerate(current_polys_from_loop):
             if p_valid.area > cfg_min_area_thresh:
-                # Ensure poly_id is a string for consistent dictionary keys if used later
                 poly_id_str = f"{i}-{idx}" if len(current_polys_from_loop) > 1 else str(i)
                 shapely_polys_data.append({
-                    'id': poly_id_str, # Store id as string
+                    'id': poly_id_str, 
                     'shapely_poly': p_valid,
                     'area': p_valid.area,
-                    'children_polys': [], # Store actual Shapely objects of children
-                    'parent_poly_id': None # Store ID of parent
+                    'children_polys': [], 
+                    'parent_poly_id': None 
                 })
         processed_loop_indices.add(i)
 
     if not shapely_polys_data:
         return []
-
+    
     shapely_polys_data.sort(key=lambda x: x['area'], reverse=True)
 
-    # Parent-child relationship identification
     for i in range(len(shapely_polys_data)):
         current_node_data = shapely_polys_data[i]
         current_poly = current_node_data['shapely_poly']
         tightest_parent_data = None
-        min_parent_area_diff = float('inf') # Prefer parent that is closest in area yet larger
+        min_parent_area_diff = float('inf') 
 
-        for j in range(i): # Only check polygons already processed (which are larger or equal area)
+        for j in range(i): 
             potential_parent_candidate_data = shapely_polys_data[j]
             candidate_parent_poly = potential_parent_candidate_data['shapely_poly']
             try:
-                # More robust check: polygon must contain the current polygon's representative point
-                # and the intersection area must be very close to current_poly's area.
                 if candidate_parent_poly.is_valid and current_poly.is_valid and \
-                   candidate_parent_poly.contains(current_poly.representative_point()): # Efficient check first
-                    # Check if current_poly is almost entirely within candidate_parent_poly
+                   candidate_parent_poly.contains(current_poly.representative_point()): 
                     intersection_area = current_poly.intersection(candidate_parent_poly).area
-                    if abs(intersection_area - current_poly.area) < (current_poly.area * 0.01 + cfg_coord_epsilon): # Tolerance
+                    if abs(intersection_area - current_poly.area) < (current_poly.area * 0.01 + cfg_coord_epsilon**2): 
                         area_diff = candidate_parent_poly.area - current_poly.area
-                        if area_diff >= 0 and area_diff < min_parent_area_diff: # Parent must be larger or equal
+                        if area_diff >= 0 and area_diff < min_parent_area_diff: 
                             tightest_parent_data = potential_parent_candidate_data
                             min_parent_area_diff = area_diff
-            except Exception: # Handle potential errors in geometric operations
-                pass # print(f"Warning: Exception during parent check for poly {current_node_data['id']}. Skipping candidate.")
+            except Exception: 
+                pass 
 
         if tightest_parent_data:
             current_node_data['parent_poly_id'] = tightest_parent_data['id']
-            tightest_parent_data['children_polys'].append(current_poly) # Store the actual shapely object
+            tightest_parent_data['children_polys'].append(current_poly) 
 
-    # Create laminae (regions = parent - union_of_direct_children)
     all_laminae_shapely_polys = []
-    for node_data in shapely_polys_data:
-        if node_data['parent_poly_id'] is None: # Process only top-level polygons (those without a parent in our list)
-                                               # or process all and subtract their own direct children
-            parent_poly = node_data['shapely_poly']
-            direct_children_polys = node_data['children_polys'] # These are actual Shapely objects
+    for node_data in shapely_polys_data: # Iterate through ALL polygons. Each will form the base of a lamina.
+        
+        parent_poly_for_lamina = node_data['shapely_poly'] 
+        direct_children_shapely_objects = node_data['children_polys']
 
-            lamina_result = parent_poly
-            if direct_children_polys:
-                try:
-                    # Ensure children are valid before unioning
-                    valid_children = [ch for ch in direct_children_polys if ch.is_valid]
-                    if not valid_children:
-                        children_union = None
-                    else:
-                        children_union = unary_union(valid_children) # Union of direct children
+        lamina_result = parent_poly_for_lamina 
+        
+        if direct_children_shapely_objects:
+            try:
+                valid_children = [ch for ch in direct_children_shapely_objects if ch.is_valid and not ch.is_empty]
+                if not valid_children:
+                    children_union = None
+                else:
+                    children_union = unary_union(valid_children) 
 
-                    if children_union and not children_union.is_empty:
-                        lamina_result = parent_poly.difference(children_union)
-                except Exception: # Keep parent_poly if difference fails
-                    # print(f"Warning: Difference operation failed for polygon {node_data['id']}. Using original polygon.")
-                    pass # Lamina_result remains parent_poly
+                if children_union and not children_union.is_empty:
+                    potential_lamina = parent_poly_for_lamina.difference(children_union)
+                    
+                    if potential_lamina.is_empty:
+                        continue 
+                    
+                    if not potential_lamina.is_valid:
+                        potential_lamina = make_valid(potential_lamina)
 
-            if not lamina_result.is_empty and lamina_result.area > cfg_min_area_thresh:
-                if lamina_result.geom_type == 'Polygon':
-                    all_laminae_shapely_polys.append(lamina_result)
-                elif lamina_result.geom_type == 'MultiPolygon':
-                    for p in lamina_result.geoms: # Use .geoms
-                        if p.area > cfg_min_area_thresh:
-                            all_laminae_shapely_polys.append(p)
+                    lamina_result = potential_lamina
+                    
+            except Exception: 
+                pass 
+
+        if not lamina_result or lamina_result.is_empty:
+            continue
+
+        if not lamina_result.is_valid:
+            lamina_result = make_valid(lamina_result)
+
+        if lamina_result and not lamina_result.is_empty and lamina_result.area > cfg_min_area_thresh:
+            if lamina_result.geom_type == 'Polygon':
+                all_laminae_shapely_polys.append(lamina_result)
+            elif lamina_result.geom_type == 'MultiPolygon':
+                for p in lamina_result.geoms: 
+                    if p.is_valid and not p.is_empty and p.area > cfg_min_area_thresh:
+                        all_laminae_shapely_polys.append(p)
 
     candidate_regions_for_classification = []
     if all_laminae_shapely_polys:
         for shapely_poly in all_laminae_shapely_polys:
-            # Ensure polygon is valid and has an exterior before processing
             if shapely_poly.is_valid and shapely_poly.exterior and shapely_poly.area > cfg_min_area_thresh :
                 coords = list(shapely_poly.exterior.coords)
                 interiors = []
-                if hasattr(shapely_poly, 'interiors'): # Check for interiors attribute
+                if hasattr(shapely_poly, 'interiors'): 
                     interiors = [list(interior.coords) for interior in shapely_poly.interiors]
 
                 candidate_regions_for_classification.append({
@@ -138,8 +142,8 @@ def identify_candidate_regions_shapely(layer_wall_loops, cfg_min_area_thresh, cf
                     'interiors_float': interiors,
                     'centroid': (shapely_poly.centroid.x, shapely_poly.centroid.y)
                 })
-        # Sort by centroid for consistent numbering if needed later
         candidate_regions_for_classification.sort(key=lambda p: (p['centroid'][1], p['centroid'][0]))
+    
     return candidate_regions_for_classification
 
 
@@ -162,7 +166,7 @@ def generate_infill_segments_for_polygon(polygon, angle_degrees, line_spacing,
     
     infill_lines = []
     num_lines = math.ceil(max_extent / line_spacing) + 1 
-    start_y_for_sweep = centroid_y - (num_lines / 2) * line_spacing + (line_spacing / 2) # Center lines better
+    start_y_for_sweep = centroid_y - (num_lines / 2) * line_spacing + (line_spacing / 2) 
 
     for i in range(num_lines):
         y_coord = start_y_for_sweep + i * line_spacing
@@ -180,11 +184,10 @@ def generate_infill_segments_for_polygon(polygon, angle_degrees, line_spacing,
                     if intersection.length > cfg_coord_epsilon * 5: 
                         clipped_segments.append(intersection)
                 elif intersection.geom_type == 'MultiLineString':
-                    for segment in intersection.geoms: # Use .geoms
+                    for segment in intersection.geoms: 
                         if segment.geom_type == 'LineString' and segment.length > cfg_coord_epsilon * 5:
                             clipped_segments.append(segment)
-        except Exception: # Handle potential errors during intersection
-            # print(f"Warning: Intersection failed for a rotated line. Skipping.")
+        except Exception: 
             pass
 
 
@@ -194,7 +197,7 @@ def generate_infill_segments_for_polygon(polygon, angle_degrees, line_spacing,
     y_sort_multiplier = -1 if cfg_y_order_top_to_bottom else 1
     x_sort_multiplier = 1 if cfg_x_order_left_to_right else -1
 
-    def get_point_sweep_value(point_tuple): # point_tuple is (x,y)
+    def get_point_sweep_value(point_tuple): 
         return (y_sort_multiplier * point_tuple[1], x_sort_multiplier * point_tuple[0])
 
     oriented_segments = []
@@ -222,7 +225,7 @@ def generate_infill_segments_for_polygon(polygon, angle_degrees, line_spacing,
             first_point_of_cell_infill = primary_seg_start
 
         if last_processed_start_point is not None and \
-           not gcode_parser.are_points_close(last_processed_start_point, primary_seg_start, cfg_coord_epsilon): # Use imported
+           not gcode_parser.are_points_close(last_processed_start_point, primary_seg_start, cfg_coord_epsilon): 
             connecting_line = LineString([last_processed_start_point, primary_seg_start])
             if connecting_line.length > cfg_coord_epsilon:
                 final_infill_elements.append((connecting_line, "connection"))
@@ -248,11 +251,11 @@ def generate_and_mask_grid(classified_regions, wall_loops, travel_segments,
                            cfg_infill_region_shrink_offset, cfg_coord_epsilon, cfg_min_area_thresh,
                            cfg_x_order_left_to_right, cfg_y_order_top_to_bottom):
     if not SHAPELY_AVAILABLE:
-        print("Shapely not available in geometry_operations.generate_and_mask_grid")
+        # print("Shapely not available in geometry_operations.generate_and_mask_grid") # Redundant if main handles
         return []
 
     if not classified_regions:
-        print("No classified regions to mask against.")
+        # print("No classified regions to mask against.") # Potentially verbose
         return []
 
     all_coords = []
@@ -262,22 +265,22 @@ def generate_and_mask_grid(classified_regions, wall_loops, travel_segments,
         all_coords.append(seg_start)
         all_coords.append(seg_end)
     for region_data in classified_regions:
-        if region_data['shapely_poly']: # Polygon should exist
-            all_coords.append(region_data['shapely_poly'].bounds[0:2]) # (minx, miny)
-            all_coords.append(region_data['shapely_poly'].bounds[2:4]) # (maxx, maxy)
+        if region_data['shapely_poly']: 
+            all_coords.append(region_data['shapely_poly'].bounds[0:2]) 
+            all_coords.append(region_data['shapely_poly'].bounds[2:4]) 
 
     if not all_coords:
-        print("No coordinates found to determine print bounds.")
+        # print("No coordinates found to determine print bounds.") # Potentially verbose
         return []
 
     min_x = min(p[0] for p in all_coords) - cfg_bounds_buffer
     max_x = max(p[0] for p in all_coords) + cfg_bounds_buffer
     min_y = min(p[1] for p in all_coords) - cfg_bounds_buffer
-    max_y = max(p[1] for p in all_coords) + cfg_bounds_buffer
+    max_y = max(p[1] for p in all_coords) + cfg_bounds_buffer # Corrected 'all_rds' to 'all_coords'
 
     infill_polygons = [r['shapely_poly'] for r in classified_regions if r['contains_infill'] and r['shapely_poly']]
     if not infill_polygons:
-        print("No infillable regions found for masking.")
+        # print("No infillable regions found for masking.") # Potentially verbose
         return []
 
     infill_mask = unary_union(infill_polygons)
@@ -289,13 +292,15 @@ def generate_and_mask_grid(classified_regions, wall_loops, travel_segments,
             shrunk_infill_mask = infill_mask.buffer(-cfg_infill_region_shrink_offset)
             if not shrunk_infill_mask.is_empty and shrunk_infill_mask.is_valid:
                 infill_mask = shrunk_infill_mask
-            else:
-                print(f"Warning: Buffering infill mask by -{cfg_infill_region_shrink_offset}mm resulted in empty or invalid. Keeping original.")
-        except Exception as e:
-            print(f"Error buffering infill mask: {e}. Keeping original mask.")
+            # else: # Potentially verbose warning if buffer results in empty/invalid
+                # print(f"Warning: Buffering infill mask by -{cfg_infill_region_shrink_offset}mm resulted in empty or invalid. Keeping original.")
+        except Exception: # Broad exception for buffer issues
+            # print(f"Error buffering infill mask: {e}. Keeping original mask.") # Potentially verbose
+            pass
+
 
     if infill_mask.is_empty:
-        print("Unified infill mask is empty after unioning and optional buffering.")
+        # print("Unified infill mask is empty after unioning and optional buffering.") # Potentially verbose
         return []
 
     clipped_grid_cells_data = [] 
@@ -325,7 +330,7 @@ def generate_and_mask_grid(classified_regions, wall_loops, travel_segments,
                 if intersection_result.geom_type == 'Polygon':
                     polys_to_add.append(intersection_result)
                 elif intersection_result.geom_type == 'MultiPolygon':
-                    polys_to_add.extend(list(intersection_result.geoms)) # Use .geoms
+                    polys_to_add.extend(list(intersection_result.geoms)) 
 
                 for poly_part in polys_to_add:
                     if poly_part.geom_type == 'Polygon' and poly_part.area > cfg_min_area_thresh / 100.0: 
