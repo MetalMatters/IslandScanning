@@ -9,8 +9,7 @@ from . import gcode_parser # For are_points_close, dist_sq
 # from . import config as cfg # If you need to access config directly, though prefer passing values
 
 def generate_gcode_from_toolpaths(
-    ordered_toolpaths, # list of (Shapely LineString, segment_type string)
-    layer_z_height,
+    ordered_toolpaths,    layer_z_height,
     output_gcode_filepath_str,
     cfg_feedrate_primary,
     cfg_feedrate_boundary,
@@ -18,8 +17,13 @@ def generate_gcode_from_toolpaths(
     cfg_feedrate_travel,
     cfg_extrusion_multiplier,
     cfg_initial_e_value=0.0,
-    cfg_coord_epsilon=0.01 # For filtering tiny segments
-):
+    cfg_coord_epsilon=0.01):
+
+    print(f"[DEBUG] Entered generate_gcode_from_toolpaths")
+    print(f"[DEBUG] Number of toolpaths: {len(ordered_toolpaths)}")
+    print(f"[DEBUG] Output file: {output_gcode_filepath_str}")
+    print(f"[DEBUG] Layer Z height: {layer_z_height}")
+
     gcode_lines = []
     current_x, current_y, current_z, current_e = None, None, None, cfg_initial_e_value
     
@@ -117,14 +121,14 @@ def generate_gcode_from_toolpaths(
             gcode_command_parts.append(f"X{target_x_val}")
             gcode_command_parts.append(f"Y{target_y_val}")
             # Z is assumed to be modal from the initial G0 Z command for the layer.
-            # If Z changes mid-layer (e.g. Z-hop within infill, not typical for this script), add Z here.
 
-            if extrude_this_segment_type:
-                segment_length = math.sqrt(gcode_parser.dist_sq(p_start, p_end)) # Use original points for length
-                delta_e = cfg_extrusion_multiplier * segment_length
-                current_e += delta_e
-                gcode_command_parts.append(f"E{current_e:.5f}") # Typical E precision
-            
+            # REMOVE E value for laser G-code
+            # if extrude_this_segment_type:
+            #     segment_length = math.sqrt(gcode_parser.dist_sq(p_start, p_end)) # Use original points for length
+            #     delta_e = cfg_extrusion_multiplier * segment_length
+            #     current_e += delta_e
+            #     gcode_command_parts.append(f"E{current_e:.5f}") # Typical E precision
+
             if feedrate_to_use is not None:
                 gcode_command_parts.append(f"F{int(feedrate_to_use)}")
 
@@ -138,9 +142,12 @@ def generate_gcode_from_toolpaths(
     # Optional: Add M107 (Fan Off), etc. if this G-code is meant to be standalone.
 
     try:
+        print("[DEBUG] Attempting to write G-code file...")
         with open(output_gcode_filepath_str, 'w') as f:
             for line in gcode_lines:
-                f.write(line + "\n")
+                f.write(line + '\n')
         print(f"SUCCESS: Generated G-code saved to: {output_gcode_filepath_str}")
     except IOError as e:
         print(f"ERROR: Could not write G-code file to '{output_gcode_filepath_str}': {e}")
+
+    print("[DEBUG] Exiting generate_gcode_from_toolpaths")

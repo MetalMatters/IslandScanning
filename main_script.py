@@ -337,18 +337,21 @@ if __name__ == "__main__":
                 print(f"Time for common plot elements and final plot display/save: {time.time() - stage_start_time:.3f} seconds")
 
             # --- 7. G-code Generation (if enabled for masked_grid mode) ---
+            print(f"[DEBUG] PLOT_MODE: {cfg.PLOT_MODE}, ENABLE_GCODE_GENERATION: {cfg.ENABLE_GCODE_GENERATION}")
+            print(f"[DEBUG] all_toolpaths_ordered_for_gcode length: {len(all_toolpaths_ordered_for_gcode)}")
+            print(f"[DEBUG] target_layer_z: {target_layer_z}")
+
             if cfg.PLOT_MODE == "masked_grid" and cfg.ENABLE_GCODE_GENERATION:
                 print("\n--- Stage 7: G-code Generation ---")
                 if not all_toolpaths_ordered_for_gcode:
-                    print("No toolpaths were generated for G-code output. Skipping G-code generation.")
+                    print("[DEBUG] No toolpaths were generated for G-code output. Skipping G-code generation.")
                 elif target_layer_z is None:
-                    print(f"SKIPPING G-code generation: Z-height for layer {cfg.PLOT_LAYER_NUMBER} could not be determined.")
+                    print(f"[DEBUG] SKIPPING G-code generation: Z-height for layer {cfg.PLOT_LAYER_NUMBER} could not be determined.")
                 else:
-                    gcode_gen_start_time = time.time()
-                    print(f"Attempting G-code generation for layer {cfg.PLOT_LAYER_NUMBER} at Z={target_layer_z:.3f}...")
+                    print("[DEBUG] Calling generate_gcode_from_toolpaths...")
                     gcode_generator.generate_gcode_from_toolpaths(
                         all_toolpaths_ordered_for_gcode,
-                        target_layer_z, # Must be a float
+                        target_layer_z,
                         cfg.GENERATED_GCODE_FILE_PATH_STR,
                         cfg.FEEDRATE_PRIMARY_INFILL,
                         cfg.FEEDRATE_BOUNDARY_CONNECTION,
@@ -356,12 +359,9 @@ if __name__ == "__main__":
                         cfg.FEEDRATE_TRAVEL,
                         cfg.EXTRUSION_MULTIPLIER,
                         cfg.INITIAL_E_VALUE_FOR_GENERATED_LAYER,
-                        cfg.COORD_EPSILON # Pass for filtering tiny segments in G-code gen
+                        cfg.COORD_EPSILON
                     )
-                    print(f"Time for G-code generation: {time.time() - gcode_gen_start_time:.3f} seconds")
-            elif cfg.ENABLE_GCODE_GENERATION and cfg.PLOT_MODE != "masked_grid":
-                print("\nNote: G-code generation is enabled but PLOT_MODE is not 'masked_grid'. G-code will not be generated.")
-
+                    print("[DEBUG] generate_gcode_from_toolpaths call finished.")
 
         print(f"\nTotal time for processing layer {cfg.PLOT_LAYER_NUMBER}: {time.time() - processing_section_start_time:.3f} seconds")
 
