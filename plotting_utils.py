@@ -162,19 +162,19 @@ def plot_common_elements_on_ax(ax, wall_loops_for_plot_layer, travel_segments_to
                      linewidth=0.8, label="Original Wall Loops" if first_wall else None, zorder=10)
             first_wall = False
 
-def finalize_plot(fig, ax, title_str, output_plot_path_str):
+def finalize_plot(fig, ax, title_str, output_plot_path_str, show_plot=True):
     if not MATPLOTLIB_AVAILABLE or fig is None or ax is None: return
     ax.set_title(title_str)
     plt.xlabel("X (mm)")
     plt.ylabel("Y (mm)")
     ax.set_aspect('equal', adjustable='box')
     handles, labels = ax.get_legend_handles_labels()
-    if handles: # Create legend with unique labels
+    if handles:
         unique_labels = {}
         for handle, label in zip(handles, labels):
             if label not in unique_labels:
                 unique_labels[label] = handle
-        if unique_labels: # Check if there's anything to make a legend for
+        if unique_labels:
              ax.legend(unique_labels.values(), unique_labels.keys(), loc='upper right', prop={'size': 7})
     plt.grid(True, linestyle='--', alpha=0.7)
 
@@ -186,8 +186,8 @@ def finalize_plot(fig, ax, title_str, output_plot_path_str):
             print("Plot saved.")
         except Exception as e:
             print(f"Error saving plot: {e}")
-        # print(f"Time for saving plot: {time.time() - save_start_time:.3f} seconds") # Optional timing
 
-    show_start_time = time.time()
-    plt.show() # This is a blocking call
-    print(f"Time for plt.show() (blocking): {time.time() - show_start_time:.3f} seconds")
+    if show_plot:
+        show_start_time = time.time()
+        plt.show()
+        print(f"Time for plt.show() (blocking): {time.time() - show_start_time:.3f} seconds")
