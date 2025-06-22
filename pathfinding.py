@@ -16,6 +16,7 @@ except ImportError:
 
 # Import utility functions like are_points_close and dist_sq
 from . import gcode_parser # Use relative import
+from .geometry_operations import geometry_hash
 
 def build_boundary_graph(clipped_cells_data, cfg_coord_epsilon):
     if not NETWORKX_AVAILABLE or not SHAPELY_AVAILABLE_FOR_PATHFINDING:
@@ -175,3 +176,23 @@ def find_shortest_path_on_boundary(graph, start_point, end_point,
         return None # Other error
         
     return None # Should not be reached if logic is correct
+
+class RoutingCache:
+    def __init__(self):
+        self.cache = {}
+
+    def get_routing(self, cell_id):
+        return self.cache.get(cell_id)
+
+    def update_routing(self, cell_id, infill_segments):
+        self.cache[cell_id] = infill_segments
+
+class ConnectionCache:
+    def __init__(self):
+        self.cache = {}
+
+    def get_connection(self, from_id, to_id):
+        return self.cache.get((from_id, to_id))
+
+    def update_connection(self, from_id, to_id, path):
+        self.cache[(from_id, to_id)] = path

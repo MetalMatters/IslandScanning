@@ -10,7 +10,7 @@ BASE_WORKING_DIRECTORY = Path(r"C:\Users\Jeremy\Desktop\work\\") # <--- !!! UPDA
 GCODE_FILE_NAME = "CFFFP_3DBenchy.gcode" # Your input G-code file
 GCODE_FILE_PATH_STR = str(BASE_WORKING_DIRECTORY / GCODE_FILE_NAME)
 
-PLOT_LAYER_NUMBER = 123 # Layer to process and plot/generate G-code for
+PLOT_LAYER_NUMBER = 12 # Layer to process and plot/generate G-code for
 
 # --- Plotting Configuration ---
 # Set to "classified_regions" to see the original classification with numbers.
@@ -69,3 +69,5 @@ SMALL_DIST_FACTOR = 10
 min_segment_dist_threshold = COORD_EPSILON / SMALL_DIST_FACTOR # For original infill classification
 min_segment_length_epsilon_sq = min_segment_dist_threshold**2  # For filtering tiny G-code segments
 moved_xy_threshold = min_segment_dist_threshold / 10.0         # For detecting XY movement in G-code parser
+
+DRASTIC_CHANGE_THRESHOLD = 0.5  # 50% of cells changed triggers full recompute

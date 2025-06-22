@@ -21,6 +21,10 @@ from . import geometry_operations
 from . import pathfinding
 from . import plotting_utils # This module will handle its own matplotlib import status
 from . import gcode_generator  # NEW: Import the G-code generator module
+from .pathfinding import RoutingCache, ConnectionCache
+from .geometry_operations import geometry_hash, cells_are_equivalent
+routing_cache = RoutingCache()
+connection_cache = ConnectionCache()
 
 # --- Check for external library availability ---
 # Shapely (used by geometry_operations and pathfinding for Point/LineString)
@@ -97,7 +101,11 @@ if __name__ == "__main__":
                   f" Parsed Z: {layer_z_values.get(layer_n, 'N/A')}")
 
     # --- Multi-layer Processing Loop ---
+    prev_cells_by_idx = None  # <-- Place before your for layer_num in ... loop
     for layer_num in sorted(gcode_data_by_layer.keys()):
+        if prev_cells_by_idx is None:
+            prev_cells_by_idx = {}
+
         processing_section_start_time = time.time()
         layer_data_to_process = gcode_data_by_layer[layer_num]
         target_layer_z = layer_z_values.get(layer_num)
@@ -213,7 +221,56 @@ if __name__ == "__main__":
                 stage_start_time = time.time()
                 current_infill_angle_idx = 0
                 for cell_number, cell_data_dict in enumerate(masked_grid_cells_data_list):
+                    grid_x_idx = cell_data_dict['grid_x_idx']
+                    grid_y_idx = cell_data_dict['grid_y_idx']
+                    cell_data_dict['column_id'] = (grid_x_idx, grid_y_idx)
+                    cell_data_dict['execution_order'] = cell_number + 1  # <-- ADD THIS LINE
+
+                    cell_x = -25.0 + grid_x_idx * cfg.GRID_CELL_SIZE
+                    cell_y = -25.0 + grid_y_idx * cfg.GRID_CELL_SIZE
                     cell_poly = cell_data_dict['shapely_poly_clipped']
+
+                    prev_cell = prev_cells_by_idx.get((grid_x_idx, grid_y_idx))
+                    equivalent = False
+                    if prev_cell:
+                        poly1 = cell_data_dict['shapely_poly_clipped']
+                        poly2 = prev_cell['shapely_poly_clipped']
+                        area_diff = abs(poly1.area - poly2.area)
+                        centroid1 = poly1.centroid
+                        centroid2 = poly2.centroid
+                        centroid_dist = math.hypot(centroid1.x - centroid2.x, centroid1.y - centroid2.y)
+                        equivalent = cells_are_equivalent(cell_data_dict, prev_cell)
+                        if equivalent:
+                            print(
+                                f"[DEBUG] Cell idx=({grid_x_idx},{grid_y_idx}) coords=({cell_x:.2f},{cell_y:.2f}): "
+                                f"area_diff={area_diff:.5f}, centroid_dist={centroid_dist:.5f}, equivalent=TRUE"
+                            )
+                        else:
+                            reason = []
+                            if area_diff >= 0.9:
+                                reason.append(f"area_diff {area_diff:.5f} >= tol")
+                            if centroid_dist >= 0.9:
+                                reason.append(f"centroid_dist {centroid_dist:.5f} >= tol")
+                            print(
+                                f"[DEBUG] Cell idx=({grid_x_idx},{grid_y_idx}) coords=({cell_x:.2f},{cell_y:.2f}): "
+                                f"area_diff={area_diff:.5f}, centroid_dist={centroid_dist:.5f}, equivalent=FALSE ({'; '.join(reason)})"
+                            )
+                    else:
+                        print(
+                            f"[DEBUG] Cell idx=({grid_x_idx},{grid_y_idx}) coords=({cell_x:.2f},{cell_y:.2f}): "
+                            f"no previous cell found"
+                        )
+
+                    # --- Only recompute if not equivalent or no previous cell ---
+                    if prev_cell and equivalent:
+                        reused_routing = routing_cache.get_routing((grid_x_idx, grid_y_idx))
+                        if reused_routing is not None:
+                            cell_data_dict['infill_segments'] = reused_routing
+                            cell_data_dict['routing_reused'] = True
+                            # Set any other fields you need for plotting or downstream logic
+                            continue  # Skip recomputation
+
+                    # If not reused, recompute as usual
                     current_angle = cfg.INFILL_ANGLES_CYCLE[current_infill_angle_idx]
                     cell_infill_elements, cell_start_pt, cell_end_pt = \
                         geometry_operations.generate_infill_segments_for_polygon(
@@ -225,6 +282,12 @@ if __name__ == "__main__":
                     cell_data_dict['execution_order'] = cell_number + 1
                     cell_data_dict['cell_infill_start_pt'] = cell_start_pt
                     cell_data_dict['cell_infill_end_pt'] = cell_end_pt
+                    cell_data_dict['column_id'] = (grid_x_idx, grid_y_idx)
+                    routing_cache.update_routing(cell_data_dict['column_id'], cell_infill_elements)
+                    cell_data_dict['routing_reused'] = False
+
+                    # Update the previous cells dictionary
+                    prev_cells_by_idx[(grid_x_idx, grid_y_idx)] = cell_data_dict
 
                     if cell_poly.boundary and cell_start_pt and cell_end_pt:
                         try:
@@ -262,6 +325,8 @@ if __name__ == "__main__":
                 for i, current_cell_data_dict in enumerate(masked_grid_cells_data_list):
                     if i > 0:
                         prev_cell_data_dict = masked_grid_cells_data_list[i - 1]
+                        from_id = prev_cell_data_dict['column_id']
+                        to_id = current_cell_data_dict['column_id']
                         from_pt_boundary_prev = prev_cell_data_dict.get('cell_infill_end_pt_on_boundary')
                         to_pt_boundary_curr = current_cell_data_dict.get('cell_infill_start_pt_on_boundary')
                         from_pt_internal_prev = prev_cell_data_dict.get('cell_infill_end_pt')
@@ -270,22 +335,20 @@ if __name__ == "__main__":
                         connection_path_segments_added = False
                         if NETWORKX_AVAILABLE and boundary_graph_for_paths and boundary_graph_for_paths.number_of_nodes() > 0 and \
                            from_pt_boundary_prev and to_pt_boundary_curr and from_pt_internal_prev and to_pt_internal_curr:
-                            path_on_boundary_line = pathfinding.find_shortest_path_on_boundary(
-                                boundary_graph_for_paths, from_pt_boundary_prev, to_pt_boundary_curr,
-                                cfg.NODE_MERGE_EPSILON, cfg.ON_SEGMENT_EPSILON, cfg.ENDPOINT_DISTINCTION_EPSILON,
-                                cfg.COORD_EPSILON, cfg.GRID_CELL_SIZE
-                            )
-                            if path_on_boundary_line and path_on_boundary_line.length > cfg.COORD_EPSILON / 10:
-                                if not gcode_parser.are_points_close(from_pt_internal_prev, from_pt_boundary_prev, cfg.COORD_EPSILON):
-                                    all_toolpaths_ordered_for_gcode.append((LineString([from_pt_internal_prev, from_pt_boundary_prev]), "inter_cell_direct_jump_part"))
-                                all_toolpaths_ordered_for_gcode.append((path_on_boundary_line, "inter_cell_boundary_connection"))
-                                last_boundary_path_pt = path_on_boundary_line.coords[-1]
-                                if not gcode_parser.are_points_close(last_boundary_path_pt, to_pt_internal_curr, cfg.COORD_EPSILON):
-                                    if not gcode_parser.are_points_close(last_boundary_path_pt, to_pt_boundary_curr, cfg.COORD_EPSILON):
-                                        all_toolpaths_ordered_for_gcode.append((LineString([last_boundary_path_pt, to_pt_boundary_curr]), "inter_cell_direct_jump_part"))
-                                    if not gcode_parser.are_points_close(to_pt_boundary_curr, to_pt_internal_curr, cfg.COORD_EPSILON):
-                                        all_toolpaths_ordered_for_gcode.append((LineString([to_pt_boundary_curr, to_pt_internal_curr]), "inter_cell_direct_jump_part"))
+                            cached_path = connection_cache.get_connection(from_id, to_id)
+                            if cached_path is not None:
+                                all_toolpaths_ordered_for_gcode.append((cached_path, "inter_cell_boundary_connection"))
                                 connection_path_segments_added = True
+                            else:
+                                path_on_boundary_line = pathfinding.find_shortest_path_on_boundary(
+                                    boundary_graph_for_paths, from_pt_boundary_prev, to_pt_boundary_curr,
+                                    cfg.NODE_MERGE_EPSILON, cfg.ON_SEGMENT_EPSILON, cfg.ENDPOINT_DISTINCTION_EPSILON,
+                                    cfg.COORD_EPSILON, cfg.GRID_CELL_SIZE
+                                )
+                                if path_on_boundary_line and path_on_boundary_line.length > cfg.COORD_EPSILON / 10:
+                                    all_toolpaths_ordered_for_gcode.append((path_on_boundary_line, "inter_cell_boundary_connection"))
+                                    connection_cache.update_connection(from_id, to_id, path_on_boundary_line)
+                                    connection_path_segments_added = True
 
                         if not connection_path_segments_added and from_pt_internal_prev and to_pt_internal_curr:
                             if not gcode_parser.are_points_close(from_pt_internal_prev, to_pt_internal_curr, cfg.COORD_EPSILON):
@@ -295,6 +358,93 @@ if __name__ == "__main__":
                         all_toolpaths_ordered_for_gcode.extend(current_cell_data_dict['infill_segments'])
                 print(f"Assembled {len(all_toolpaths_ordered_for_gcode)} toolpath segments.")
                 print(f"Time for inter-cell connections and toolpath assembly: {time.time() - inter_cell_conn_assembly_start_time:.3f} seconds")
+
+                num_cells = len(masked_grid_cells_data_list)
+                num_reused = sum(1 for c in masked_grid_cells_data_list if c.get('routing_reused', False))
+                num_changed = num_cells - num_reused
+                percent_changed = 100.0 * num_changed / num_cells if num_cells > 0 else 0.0
+                print(f"[DEBUG] {percent_changed:.1f}% of grid cells required recompute ({num_changed}/{num_cells}) in layer {layer_num}.")
+
+                non_equivalent_cells = []
+                for cell_number, cell_data_dict in enumerate(masked_grid_cells_data_list):
+                    grid_x_idx = cell_data_dict['grid_x_idx']
+                    grid_y_idx = cell_data_dict['grid_y_idx']
+
+                    prev_cell = prev_cells_by_idx.get((grid_x_idx, grid_y_idx))
+                    equivalent = False
+                    if prev_cell:
+                        poly1 = cell_data_dict['shapely_poly_clipped']
+                        poly2 = prev_cell['shapely_poly_clipped']
+                        area_diff = abs(poly1.area - poly2.area)
+                        centroid1 = poly1.centroid
+                        centroid2 = poly2.centroid
+                        centroid_dist = math.hypot(centroid1.x - centroid2.x, centroid1.y - centroid2.y)
+                        equivalent = cells_are_equivalent(cell_data_dict, prev_cell)
+                        if not equivalent:
+                            non_equivalent_cells.append((grid_x_idx, grid_y_idx))
+                    else:
+                        non_equivalent_cells.append((grid_x_idx, grid_y_idx))  # No previous cell, must recompute
+
+                num_changed = len(non_equivalent_cells)
+                percent_changed = 100.0 * num_changed / num_cells if num_cells > 0 else 0.0
+                print(f"[DEBUG] {percent_changed:.1f}% of grid cells require recompute ({num_changed}/{num_cells}) in layer {layer_num}.")
+                print(f"[DEBUG] Non-equivalent cell indices: {non_equivalent_cells}")
+
+                if num_cells > 0 and (num_changed / num_cells) > cfg.DRASTIC_CHANGE_THRESHOLD:
+                    print(f"Drastic change detected in layer {layer_num}: {num_changed}/{num_cells} cells changed. Forcing full recompute.")
+                    routing_cache.cache.clear()
+                    connection_cache.cache.clear()
+
+                    # Recompute infill and connections for this layer without using caches
+                    all_toolpaths_ordered_for_gcode = []
+                    current_infill_angle_idx = 0
+                    for cell_number, cell_data_dict in enumerate(masked_grid_cells_data_list):
+                        cell_poly = cell_data_dict['shapely_poly_clipped']
+                        centroid = cell_poly.centroid
+                        grid_x_idx = int(round(centroid.x / cfg.GRID_CELL_SIZE))
+                        grid_y_idx = int(round(centroid.y / cfg.GRID_CELL_SIZE))
+                        cell_data_dict['column_id'] = (grid_x_idx, grid_y_idx)
+
+                        current_angle = cfg.INFILL_ANGLES_CYCLE[current_infill_angle_idx]
+                        cell_infill_elements, cell_start_pt, cell_end_pt = \
+                            geometry_operations.generate_infill_segments_for_polygon(
+                                cell_poly, current_angle, cfg.INFILL_LINE_SPACING,
+                                cfg.COORD_EPSILON, cfg.X_ORDER_LEFT_TO_RIGHT, cfg.Y_ORDER_TOP_TO_BOTTOM
+                            )
+                        cell_data_dict['infill_segments'] = cell_infill_elements
+                        cell_data_dict['infill_angle'] = current_angle
+                        cell_data_dict['execution_order'] = cell_number + 1
+                        cell_data_dict['cell_infill_start_pt'] = cell_start_pt
+                        cell_data_dict['cell_infill_end_pt'] = cell_end_pt
+                        cell_data_dict['routing_reused'] = False
+
+                        # ... boundary/interior point logic as before ...
+                        current_infill_angle_idx = (current_infill_angle_idx + 1) % len(cfg.INFILL_ANGLES_CYCLE)
+
+                    # Re-assemble inter-cell connections (skip cache usage)
+                    for i, current_cell_data_dict in enumerate(masked_grid_cells_data_list):
+                        if i > 0:
+                            prev_cell_data_dict = masked_grid_cells_data_list[i - 1]
+                            from_pt_boundary_prev = prev_cell_data_dict.get('cell_infill_end_pt_on_boundary')
+                            to_pt_boundary_curr = current_cell_data_dict.get('cell_infill_start_pt_on_boundary')
+                            from_pt_internal_prev = prev_cell_data_dict.get('cell_infill_end_pt')
+                            to_pt_internal_curr = current_cell_data_dict.get('cell_infill_start_pt')
+
+                            connection_path_segments_added = False
+                            if NETWORKX_AVAILABLE and boundary_graph_for_paths and boundary_graph_for_paths.number_of_nodes() > 0 and \
+                               from_pt_boundary_prev and to_pt_boundary_curr and from_pt_internal_prev and to_pt_internal_curr:
+                                path_on_boundary_line = pathfinding.find_shortest_path_on_boundary(
+                                    boundary_graph_for_paths, from_pt_boundary_prev, to_pt_boundary_curr,
+                                    cfg.NODE_MERGE_EPSILON, cfg.ON_SEGMENT_EPSILON, cfg.ENDPOINT_DISTINCTION_EPSILON,
+                                    cfg.COORD_EPSILON, cfg.GRID_CELL_SIZE
+                                )
+                                if path_on_boundary_line and path_on_boundary_line.length > cfg.COORD_EPSILON / 10:
+                                    all_toolpaths_ordered_for_gcode.append((path_on_boundary_line, "inter_cell_boundary_connection"))
+                                    connection_path_segments_added = True
+
+                            if not connection_path_segments_added and from_pt_internal_prev and to_pt_internal_curr:
+                                if not gcode_parser.are_points_close(from_pt_internal_prev, to_pt_internal_curr, cfg.COORD_EPSILON):
+                                    all_toolpaths_ordered_for_gcode.append((LineString([from_pt_internal_prev, to_pt_internal_curr]), "inter_cell_direct_jump"))
 
                 if fig and ax:
                     plotting_utils.plot_masked_grid_on_ax(ax, masked_grid_cells_data_list, all_toolpaths_ordered_for_gcode)

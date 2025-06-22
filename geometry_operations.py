@@ -1,4 +1,5 @@
 import math
+import hashlib
 try:
     from shapely.geometry import Polygon, MultiPolygon, Point, LineString
     from shapely.ops import unary_union
@@ -304,8 +305,8 @@ def generate_and_mask_grid(classified_regions, wall_loops, travel_segments,
         return []
 
     clipped_grid_cells_data = [] 
-    start_x = math.floor(min_x / cfg_grid_cell_size) * cfg_grid_cell_size
-    start_y = math.floor(min_y / cfg_grid_cell_size) * cfg_grid_cell_size
+    start_x = -25.0  # Or set to your desired absolute origin X
+    start_y = -25.0  # Or set to your desired absolute origin Y
 
     grid_x_idx_counter = 0
     current_x = start_x
@@ -354,3 +355,20 @@ def generate_and_mask_grid(classified_regions, wall_loops, travel_segments,
     x_sort_multiplier = 1 if cfg_x_order_left_to_right else -1
     clipped_grid_cells_data.sort(key=lambda c: (y_sort_multiplier * c['grid_y_idx'], x_sort_multiplier * c['grid_x_idx']))
     return clipped_grid_cells_data
+
+def geometry_hash(polygon, decimals=2):
+    """Returns a tolerant hash for a polygon using centroid, area, and perimeter, rounded."""
+    centroid = tuple(round(c, decimals) for c in polygon.centroid.coords[0])
+    area = round(polygon.area, decimals)
+    perimeter = round(polygon.length, decimals)
+    return hash((centroid, area, perimeter))
+
+def cells_are_equivalent(cell1, cell2, area_tol=0.9, centroid_tol=0.9):
+    """Return True if two cells are equivalent within area and centroid tolerances."""
+    poly1 = cell1['shapely_poly_clipped']
+    poly2 = cell2['shapely_poly_clipped']
+    area_diff = abs(poly1.area - poly2.area)
+    centroid1 = poly1.centroid
+    centroid2 = poly2.centroid
+    centroid_dist = math.hypot(centroid1.x - centroid2.x, centroid1.y - centroid2.y)
+    return area_diff < area_tol and centroid_dist < centroid_tol
