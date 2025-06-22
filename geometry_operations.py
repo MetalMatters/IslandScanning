@@ -363,12 +363,47 @@ def geometry_hash(polygon, decimals=2):
     perimeter = round(polygon.length, decimals)
     return hash((centroid, area, perimeter))
 
-def cells_are_equivalent(cell1, cell2, area_tol=0.9, centroid_tol=0.9):
-    """Return True if two cells are equivalent within area and centroid tolerances."""
+def cells_are_equivalent(cell1, cell2, area_tol=0.9, centroid_tol=0.9, overlap_threshold=0.9):
+    """
+    Compare two grid cells to determine if they are geometrically equivalent.
+    Now includes polygon intersection overlap ratio to detect boundary changes.
+    
+    Args:
+        cell1, cell2: Cell dictionaries containing 'shapely_poly_clipped'
+        area_tol: Maximum allowed difference in area
+        centroid_tol: Maximum allowed distance between centroids
+        overlap_threshold: Minimum intersection-over-union (IoU) ratio required
+    
+    Returns:
+        Boolean indicating if cells are equivalent
+    """
     poly1 = cell1['shapely_poly_clipped']
     poly2 = cell2['shapely_poly_clipped']
+    
+    # Check basic properties (existing checks)
     area_diff = abs(poly1.area - poly2.area)
     centroid1 = poly1.centroid
     centroid2 = poly2.centroid
     centroid_dist = math.hypot(centroid1.x - centroid2.x, centroid1.y - centroid2.y)
-    return area_diff < area_tol and centroid_dist < centroid_tol
+    
+    # Early rejection for obvious differences
+    if area_diff >= area_tol or centroid_dist >= centroid_tol:
+        return False
+    
+    # Check actual geometric overlap (new check)
+    try:
+        # Calculate intersection area
+        intersection = poly1.intersection(poly2)
+        intersection_area = intersection.area
+        
+        # Calculate union area
+        union_area = poly1.area + poly2.area - intersection_area
+        
+        # Calculate IoU (Intersection over Union)
+        if union_area > 0:
+            overlap_ratio = intersection_area / union_area
+            return overlap_ratio >= overlap_threshold
+        return False
+    except Exception:
+        # If there's any error in geometric operations, consider cells different
+        return False
