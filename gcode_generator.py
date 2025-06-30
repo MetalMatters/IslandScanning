@@ -6,7 +6,8 @@ from pathlib import Path
 # Assuming gcode_parser.are_points_close and gcode_parser.dist_sq are available
 # If this file is in the same package, a relative import is good.
 from . import gcode_parser # For are_points_close, dist_sq
-# from . import config as cfg # If you need to access config directly, though prefer passing values
+from . import laser_control
+from . import config as cfg
 
 def generate_gcode_from_toolpaths(
     ordered_toolpaths,    layer_z_height,
@@ -15,14 +16,10 @@ def generate_gcode_from_toolpaths(
     cfg_feedrate_boundary,
     cfg_feedrate_intra_conn,
     cfg_feedrate_travel,
+    cfg_feedrate_wall,  # Add this parameter
     cfg_extrusion_multiplier,
     cfg_initial_e_value=0.0,
     cfg_coord_epsilon=0.01):
-
-    print(f"[DEBUG] Entered generate_gcode_from_toolpaths")
-    print(f"[DEBUG] Number of toolpaths: {len(ordered_toolpaths)}")
-    print(f"[DEBUG] Output file: {output_gcode_filepath_str}")
-    print(f"[DEBUG] Layer Z height: {layer_z_height}")
 
     gcode_lines = []
     current_x, current_y, current_z, current_e = None, None, None, cfg_initial_e_value
@@ -66,6 +63,18 @@ def generate_gcode_from_toolpaths(
         feedrate_to_use = None
         extrude_this_segment_type = False
         gcode_prefix = "G0" # Default to travel
+
+        # Determine feedrate based on segment type
+        if segment_type == "primary_infill" or segment_type == "cell_infill":
+            current_feedrate = cfg_feedrate_primary
+        elif segment_type == "wall_segment":  # Add this condition
+            current_feedrate = cfg_feedrate_wall
+        elif segment_type == "inter_cell_boundary_connection":
+            current_feedrate = cfg_feedrate_boundary
+        elif segment_type == "inter_cell_direct_jump":
+            current_feedrate = cfg_feedrate_intra_conn
+        else:  # Default to primary infill rate for any unspecified types
+            current_feedrate = cfg_feedrate_primary
 
         if segment_type == "primary":
             feedrate_to_use = cfg_feedrate_primary
@@ -142,12 +151,151 @@ def generate_gcode_from_toolpaths(
     # Optional: Add M107 (Fan Off), etc. if this G-code is meant to be standalone.
 
     try:
-        print("[DEBUG] Attempting to write G-code file...")
+        # Ensure the directory exists
+        output_path = Path(output_gcode_filepath_str)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Write the file
         with open(output_gcode_filepath_str, 'w') as f:
             for line in gcode_lines:
                 f.write(line + '\n')
-        print(f"SUCCESS: Generated G-code saved to: {output_gcode_filepath_str}")
     except IOError as e:
         print(f"ERROR: Could not write G-code file to '{output_gcode_filepath_str}': {e}")
 
-    print("[DEBUG] Exiting generate_gcode_from_toolpaths")
+# Add these new functions
+
+def initialize_combined_gcode_file(output_filepath, start_stub):
+    """Initialize the combined G-code file with the start stub."""
+    try:
+        # Create the directory if it doesn't exist
+        output_path = Path(output_filepath)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Generate customized start G-code with proper laser control
+        customized_start = laser_control.create_start_gcode(
+            power=cfg.LASER_POWER, 
+            laser_ramp_file=cfg.LASER_RAMP_FILE
+        )
+        
+        # Write the start stub to the file
+        with open(output_filepath, 'w') as f:
+            f.write(customized_start + '\n')
+            
+    except IOError as e:
+        print(f"ERROR: Could not initialize combined G-code file '{output_filepath}': {e}")
+
+def append_layer_to_combined_gcode(output_filepath, layer_gcode, transition_stub_template):
+    """Append a layer's G-code to the combined file with a transition stub."""
+    try:
+        # Generate customized layer transition
+        customized_transition = laser_control.create_layer_transition(
+            power=cfg.LASER_POWER
+        )
+        
+        # Append both layer G-code and transition in a single operation
+        # to avoid unwanted spacing
+        with open(output_filepath, 'a') as f:
+            # Write regular layer G-code
+            for i, line in enumerate(layer_gcode):
+                f.write(line + '\n')
+            
+            # Write transition stub with ONLY ONE newline between
+            f.write(customized_transition + '\n')
+            
+    except IOError as e:
+        print(f"ERROR: Could not append layer to combined G-code file '{output_filepath}': {e}")
+
+def finalize_combined_gcode_file(output_filepath, end_stub):
+    """Finalize the combined G-code file with the end stub."""
+    try:
+        # Generate customized end G-code with proper laser control
+        customized_end = laser_control.create_end_gcode(g98_boundary=cfg.G98_BOUNDARY)
+        
+        # Append the end stub to the file
+        with open(output_filepath, 'a') as f:
+            f.write('\n' + customized_end + '\n')
+            
+    except IOError as e:
+        print(f"ERROR: Could not finalize combined G-code file '{output_filepath}': {e}")
+
+def generate_gcode_for_layer(
+    ordered_toolpaths, layer_z_height,
+    cfg_feedrate_primary,
+    cfg_feedrate_boundary,
+    cfg_feedrate_intra_conn,
+    cfg_feedrate_travel,
+    cfg_feedrate_wall,
+    cfg_coord_epsilon=0.01):
+    """
+    Generate G-code lines for a single layer.
+    All moves use G1 for proper interpolation and timing control.
+    Laser is controlled only at layer boundaries (G99/G98), not within a layer.
+    No Z movements are included - G97 will handle layer transitions.
+    """
+    gcode_lines = []
+    current_x, current_y = None, None
+    
+    # No Z movement - G97 handles this
+    # No laser on/off commands - handled at layer boundaries
+    
+    first_xy_move_in_layer_sequence = True
+    
+    for toolpath_idx, toolpath_item in enumerate(ordered_toolpaths):
+        if not isinstance(toolpath_item, tuple) or len(toolpath_item) != 2:
+            continue
+            
+        line_string_obj, segment_type = toolpath_item
+        
+        if not line_string_obj or not hasattr(line_string_obj, 'coords') or not list(line_string_obj.coords):
+            continue
+            
+        points = list(line_string_obj.coords)
+        if len(points) < 2:
+            continue
+            
+        # Determine feedrate based on segment type
+        if segment_type == "primary_infill" or segment_type == "cell_infill":
+            current_feedrate = cfg_feedrate_primary
+        elif segment_type == "wall_segment":
+            current_feedrate = cfg_feedrate_wall
+        elif segment_type == "inter_cell_boundary_connection":
+            current_feedrate = cfg_feedrate_boundary
+        elif segment_type in ["retrace", "inter_cell_direct_jump", "inter_cell_direct_jump_part"]:
+            current_feedrate = cfg_feedrate_travel
+        else:
+            current_feedrate = cfg_feedrate_primary
+            
+        # Always use G1 for all moves
+        gcode_prefix = "G1"
+        
+        # Iterate through segments within the LineString
+        for i in range(len(points) - 1):
+            p_start = points[i]
+            p_end = points[i+1]
+            
+            target_x_val, target_y_val = round(p_end[0], 3), round(p_end[1], 3)
+            
+            # Skip zero-length segments
+            if gcode_parser.are_points_close(p_start, p_end, cfg_coord_epsilon / 1000.0):
+                continue
+                
+            # Handle initial positioning or discontinuities
+            if first_xy_move_in_layer_sequence:
+                start_x_val_initial, start_y_val_initial = round(p_start[0], 3), round(p_start[1], 3)
+                gcode_lines.append(f"G1 X{start_x_val_initial} Y{start_y_val_initial} F{int(cfg_feedrate_travel)}")
+                current_x, current_y = start_x_val_initial, start_y_val_initial
+                first_xy_move_in_layer_sequence = False
+            elif current_x is not None and current_y is not None and \
+                 not gcode_parser.are_points_close((current_x, current_y), p_start, cfg_coord_epsilon * 2.0):
+                # Discontinuity detected - need to move to new start position
+                start_x_val_jump, start_y_val_jump = round(p_start[0], 3), round(p_start[1], 3)
+                gcode_lines.append(f"G1 X{start_x_val_jump} Y{start_y_val_jump} F{int(cfg_feedrate_travel)}")
+                current_x, current_y = start_x_val_jump, start_y_val_jump
+            
+            # Generate the move command
+            gcode_command = f"{gcode_prefix} X{target_x_val} Y{target_y_val} F{int(current_feedrate)}"
+            gcode_lines.append(gcode_command)
+            
+            current_x, current_y = target_x_val, target_y_val
+    
+    return gcode_lines

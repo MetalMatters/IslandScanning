@@ -363,7 +363,7 @@ def geometry_hash(polygon, decimals=2):
     perimeter = round(polygon.length, decimals)
     return hash((centroid, area, perimeter))
 
-def cells_are_equivalent(cell1, cell2, area_tol=0.9, centroid_tol=0.9, overlap_threshold=0.9):
+def cells_are_equivalent(cell1, cell2, area_tol=0.9, centroid_tol=0.9, overlap_threshold=0.98):
     """
     Compare two grid cells to determine if they are geometrically equivalent.
     Now includes polygon intersection overlap ratio to detect boundary changes.
